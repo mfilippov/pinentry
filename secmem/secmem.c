@@ -31,6 +31,10 @@
 # include <sys/types.h>
 # include <fcntl.h>
 #endif
+#if HAVE_W32_SYSTEM
+#include <windows.h>
+#endif
+
 #include <string.h>
 
 #include "secmem.h"
@@ -102,6 +106,9 @@ static volatile int pool_okay; /* may be checked in an atexit function */
 #if HAVE_MMAP
 static int   pool_is_mmapped;
 #endif
+#if HAVE_W32_SYSTEM
+static int pool_is_virtualalloc;
+#endif
 static size_t poolsize; /* allocated length */
 static size_t poollen;	/* used length */
 static MEMBLOCK *unused_blocks;
@@ -158,7 +165,12 @@ lock_pool( void *p, size_t n )
 	    log_error("can't lock memory: %s\n", strerror(errno));
 	show_warning = 1;
     }
-
+#elif HAVE_W32_SYSTEM
+	if( !VirtualLock( p, n ) ) {
+		log_error("can't lock memory: VirtualLock failed, (error %lu)\n",
+			GetLastError());
+		show_warning = 1;
+	}
 #else
     (void)p;
     (void)n;
@@ -172,6 +184,9 @@ init_pool( size_t n)
 {
 #if HAVE_MMAP
     size_t pgsize;
+#elif HAVE_W32_SYSTEM
+	size_t pgsize;
+	SYSTEM_INFO si;
 #endif
 
     poolsize = n;
@@ -213,6 +228,19 @@ init_pool( size_t n)
 	pool_okay = 1;
     }
 
+#elif HAVE_W32_SYSTEM
+	GetSystemInfo(&si);
+	pgsize = si.dwPageSize;
+	poolsize = (poolsize + pgsize -1 ) & ~(pgsize - 1);
+	pool = VirtualAlloc(NULL, poolsize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	if( !pool ) {
+		log_info("can't VirtualAlloc memory pool of %u bytes: %lu - using malloc\n",
+			(unsigned)poolsize, GetLastError());
+	}
+	else {
+		pool_is_virtualalloc = 1;
+		pool_okay = 1;
+	}
 #endif
     if( !pool_okay ) {
 	pool = malloc( poolsize );
@@ -413,6 +441,11 @@ secmem_term(void)
 #if HAVE_MMAP
     if( pool_is_mmapped )
 	munmap( pool, poolsize );
+#elif HAVE_W32_SYSTEM
+	if( pool_is_virtualalloc ) {
+		VirtualUnlock( pool, poolsize );
+		VirtualFree( pool, 0, MEM_RELEASE );
+	}
 #endif
     pool = NULL;
     pool_okay = 0;
